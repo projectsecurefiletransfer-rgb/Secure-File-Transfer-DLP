@@ -5,7 +5,7 @@ Team Leader | CET334 - Secure File Transfer & DLP System
 Implements:
 - AES-256-GCM encryption/decryption
 - Scrypt KDF for key derivation from password
-- Binary structure: Salt(32) + Nonce(16) + Tag(16) + Ciphertext
+- Binary structure: Salt(32) + Nonce(12) + Tag(16) + Ciphertext
 """
 
 import os
@@ -17,7 +17,7 @@ from Crypto.Protocol.KDF import scrypt
 #  Constants
 # ─────────────────────────────────────────
 SALT_SIZE   = 32   # bytes
-NONCE_SIZE  = 16   # bytes (GCM standard)
+NONCE_SIZE  = 12   # bytes (GCM official standard - NIST SP 800-38D)
 TAG_SIZE    = 16   # bytes (GCM authentication tag)
 KEY_SIZE    = 32   # bytes → 256-bit key
 

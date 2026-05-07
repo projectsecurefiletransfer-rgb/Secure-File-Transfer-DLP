@@ -89,8 +89,8 @@ def secure_decrypt(enc_path: str, password: str,
     Returns:
         path to the decrypted output file
     """
-    # Remove .enc extension for output
-    output_path = enc_path.replace(".enc", ".dec")
+    # Remove .enc extension for output (safe check)
+    output_path = enc_path[:-4] + ".dec" if enc_path.endswith(".enc") else enc_path + ".dec"
     result = decrypt_file(enc_path, output_path, password)
 
     log_event(
