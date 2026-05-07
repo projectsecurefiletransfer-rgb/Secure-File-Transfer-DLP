@@ -5,6 +5,7 @@ Team Leader | CET334 - Secure File Transfer & DLP System
 Implements:
 - RSA-2048 key pair generation
 - Save/load keys in PEM format (OpenSSL compatible)
+- Private key encrypted with password (AES-256-CBC via OpenSSL)
 - Encrypt/decrypt AES session keys using RSA-OAEP
 - Key stored locally (no cloud dependency)
 """
@@ -21,21 +22,27 @@ PRIVATE_KEY  = os.path.join(KEY_DIR, "private_key.pem")
 PUBLIC_KEY   = os.path.join(KEY_DIR, "public_key.pem")
 RSA_BITS     = 2048
 
+# Default password — in production, prompt the user each time
+_DEFAULT_PASSWORD = b"CET334-SecureKey"
+
 
 # ─────────────────────────────────────────
-#  Key Generation
+#  Key Generation  (with password protection)
 # ─────────────────────────────────────────
 def generate_rsa_keypair(private_path: str = PRIVATE_KEY,
-                          public_path: str  = PUBLIC_KEY) -> dict:
+                          public_path:  str = PUBLIC_KEY,
+                          password: bytes   = _DEFAULT_PASSWORD) -> dict:
     """
     Generate a new RSA-2048 key pair and save as PEM files.
+    The private key is encrypted with AES-256-CBC using the given password.
 
     Args:
         private_path: path to save private key (.pem)
         public_path:  path to save public key (.pem)
+        password:     password to encrypt the private key (bytes)
 
     Returns:
-        dict with keys: private_path, public_path, bits
+        dict with keys: private_path, public_path, bits, password_protected
     """
     os.makedirs(os.path.dirname(private_path), exist_ok=True)
     os.makedirs(os.path.dirname(public_path),  exist_ok=True)
@@ -44,12 +51,17 @@ def generate_rsa_keypair(private_path: str = PRIVATE_KEY,
     key = crypto.PKey()
     key.generate_key(crypto.TYPE_RSA, RSA_BITS)
 
-    # Serialize private key to PEM
-    private_pem = crypto.dump_privatekey(crypto.FILETYPE_PEM, key)
+    # ✅ Serialize private key WITH password encryption (AES-256-CBC)
+    private_pem = crypto.dump_privatekey(
+        crypto.FILETYPE_PEM,
+        key,
+        cipher=b"aes-256-cbc",   # encryption algorithm
+        passphrase=password        # password to protect the key
+    )
     with open(private_path, "wb") as f:
         f.write(private_pem)
 
-    # Serialize public key to PEM
+    # Serialize public key (no encryption needed for public key)
     public_pem = crypto.dump_publickey(crypto.FILETYPE_PEM, key)
     with open(public_path, "wb") as f:
         f.write(public_pem)
@@ -61,33 +73,43 @@ def generate_rsa_keypair(private_path: str = PRIVATE_KEY,
         pass  # Windows may not support Unix permissions
 
     return {
-        "private_path": private_path,
-        "public_path":  public_path,
-        "bits":         RSA_BITS,
+        "private_path":      private_path,
+        "public_path":       public_path,
+        "bits":              RSA_BITS,
+        "password_protected": True,   # ← now always True
     }
 
 
 # ─────────────────────────────────────────
 #  Load Keys
 # ─────────────────────────────────────────
-def load_private_key(path: str = PRIVATE_KEY) -> crypto.PKey:
+def load_private_key(path: str = PRIVATE_KEY,
+                     password: bytes = _DEFAULT_PASSWORD) -> crypto.PKey:
     """
-    Load a private key from a PEM file.
+    Load a password-protected private key from a PEM file.
 
     Args:
-        path: path to the private key PEM file
+        path:     path to the private key PEM file
+        password: password used when the key was generated (bytes)
 
     Returns:
         OpenSSL PKey object
 
     Raises:
         FileNotFoundError: if PEM file doesn't exist
+        ValueError:        if password is wrong
     """
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Private key not found: {path}")
 
     with open(path, "rb") as f:
-        return crypto.load_privatekey(crypto.FILETYPE_PEM, f.read())
+        pem_data = f.read()
+
+    try:
+        # ✅ Pass password so OpenSSL can decrypt the PEM before loading
+        return crypto.load_privatekey(crypto.FILETYPE_PEM, pem_data, passphrase=password)
+    except Exception as e:
+        raise ValueError(f"Failed to load private key (wrong password?): {e}")
 
 
 def load_public_key(path: str = PUBLIC_KEY) -> crypto.PKey:
@@ -124,11 +146,9 @@ def encrypt_with_public_key(data: bytes, public_key: crypto.PKey) -> bytes:
     Returns:
         encrypted bytes (256 bytes for RSA-2048)
     """
-    from OpenSSL.crypto import _lib, _ffi
     from cryptography.hazmat.primitives.asymmetric import padding
     from cryptography.hazmat.primitives import hashes
 
-    # Convert OpenSSL PKey to cryptography library key for OAEP
     pub = public_key.to_cryptography_key()
     return pub.encrypt(
         data,
@@ -205,47 +225,60 @@ if __name__ == "__main__":
 
     print("=== key_manager.py self-test ===\n")
 
-    # Use temp directory
     tmp_dir  = tempfile.mkdtemp()
     priv_pem = os.path.join(tmp_dir, "private_key.pem")
     pub_pem  = os.path.join(tmp_dir, "public_key.pem")
+    TEST_PWD = b"TestPassword123"
 
     try:
-        # Generate key pair
-        info = generate_rsa_keypair(priv_pem, pub_pem)
+        # 1. Generate key pair WITH password
+        info = generate_rsa_keypair(priv_pem, pub_pem, password=TEST_PWD)
         print(f"[OK] RSA-{info['bits']} key pair generated")
-        print(f"     Private: {info['private_path']}")
-        print(f"     Public : {info['public_path']}\n")
+        print(f"     Private : {info['private_path']}")
+        print(f"     Public  : {info['public_path']}")
+        print(f"     Protected: {info['password_protected']}\n")
 
-        # Load keys
-        priv = load_private_key(priv_pem)
+        # 2. Verify PEM file contains encryption header
+        with open(priv_pem, "r") as f:
+            pem_content = f.read()
+        assert "ENCRYPTED" in pem_content, "Private key is NOT encrypted!"
+        print("[OK] Private key PEM is password-encrypted ✓\n")
+
+        # 3. Load with correct password
+        priv = load_private_key(priv_pem, password=TEST_PWD)
         pub  = load_public_key(pub_pem)
         print("[OK] Keys loaded from PEM files\n")
 
-        # Encrypt an AES key (32 bytes) with public key
+        # 4. Encrypt an AES key (32 bytes) with public key
         fake_aes_key = os.urandom(32)
         encrypted    = encrypt_with_public_key(fake_aes_key, pub)
         print(f"[OK] AES key encrypted with RSA public key")
         print(f"     Encrypted size: {len(encrypted)} bytes\n")
 
-        # Decrypt with private key
+        # 5. Decrypt with private key
         decrypted = decrypt_with_private_key(encrypted, priv)
         assert decrypted == fake_aes_key, "Decrypted key doesn't match!"
         print("[OK] AES key decrypted with RSA private key — matches original ✓\n")
 
-        # Test wrong key detection
-        wrong_info = generate_rsa_keypair(
-            os.path.join(tmp_dir, "wrong_priv.pem"),
-            os.path.join(tmp_dir, "wrong_pub.pem"),
-        )
-        wrong_priv = load_private_key(os.path.join(tmp_dir, "wrong_priv.pem"))
+        # 6. Test wrong password rejection
+        try:
+            load_private_key(priv_pem, password=b"WrongPassword")
+            print("[FAIL] Should have raised ValueError!")
+        except ValueError:
+            print("[OK] Wrong password correctly rejected ✓\n")
+
+        # 7. Test wrong key rejection
+        wrong_priv_pem = os.path.join(tmp_dir, "wrong_priv.pem")
+        wrong_pub_pem  = os.path.join(tmp_dir, "wrong_pub.pem")
+        generate_rsa_keypair(wrong_priv_pem, wrong_pub_pem, password=TEST_PWD)
+        wrong_priv = load_private_key(wrong_priv_pem, password=TEST_PWD)
         try:
             decrypt_with_private_key(encrypted, wrong_priv)
             print("[FAIL] Should have raised ValueError!")
-        except ValueError as e:
-            print(f"[OK] Wrong key correctly rejected ✓\n")
+        except ValueError:
+            print("[OK] Wrong RSA key correctly rejected ✓\n")
 
-        # Check keys_exist()
+        # 8. keys_exist check
         assert keys_exist(priv_pem, pub_pem)
         print("[OK] keys_exist() works correctly ✓\n")
 
